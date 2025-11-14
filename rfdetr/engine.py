@@ -38,6 +38,7 @@ except ImportError:
 from typing import DefaultDict, List, Callable
 from rfdetr.util.misc import NestedTensor
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 def get_autocast_args(args):
     if DEPRECATED_AMP:
@@ -264,6 +265,10 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
     iou_types = ("bbox",) if not args.segmentation_head else ("bbox", "segm")
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
 
+    # Prepare to collect a small number of sample images with predictions for visual inspection
+    sample_images = []
+    max_samples_to_collect = 5
+
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -318,6 +323,77 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
+        # Collect sample images annotated with predicted boxes (up to max_samples_to_collect)
+        # We draw boxes on the resized input images (samples.tensors) scaling predictions accordingly.
+        try:
+            if len(sample_images) < max_samples_to_collect:
+                # samples.tensors shape: (batch, C, H, W)
+                batch_tensors = samples.tensors.cpu().detach()
+                batch_size = batch_tensors.shape[0]
+                for i in range(batch_size):
+                    if len(sample_images) >= max_samples_to_collect:
+                        break
+                    tensor_img = batch_tensors[i]
+                    # convert to HWC uint8 for drawing
+                    np_img = tensor_img.permute(1, 2, 0).numpy()
+                    # normalize to 0-1 range for display (robust to normalized inputs)
+                    np_min, np_max = np_img.min(), np_img.max()
+                    if np_max - np_min > 1e-6:
+                        np_img = (np_img - np_min) / (np_max - np_min)
+                    else:
+                        np_img = np.clip(np_img, 0.0, 1.0)
+                    h_res, w_res = np_img.shape[:2]
+
+                    # Convert to PIL
+                    pil_img = Image.fromarray((np_img * 255).astype('uint8'))
+                    draw = ImageDraw.Draw(pil_img)
+
+                    # Get original size and scale boxes to resized image
+                    orig_h, orig_w = int(targets[i]["orig_size"][0].item()), int(targets[i]["orig_size"][1].item())
+                    boxes = results_all[i]["boxes"] if "boxes" in results_all[i] else None
+                    scores = results_all[i].get("scores", None)
+                    labels = results_all[i].get("labels", None)
+                    if boxes is not None:
+                        # scale factors
+                        scale_x = w_res / float(orig_w)
+                        scale_y = h_res / float(orig_h)
+                        # boxes may be a tensor on cpu
+                        boxes_cpu = boxes.cpu().detach().numpy()
+                        for b_idx, box in enumerate(boxes_cpu):
+                            x1, y1, x2, y2 = box
+                            x1 *= scale_x
+                            x2 *= scale_x
+                            y1 *= scale_y
+                            y2 *= scale_y
+                            # draw rectangle
+                            draw.rectangle([(x1, y1), (x2, y2)], outline=(255, 0, 0), width=2)
+                            # draw label + score if available
+                            label_text = None
+                            if labels is not None:
+                                try:
+                                    lbl = int(labels[b_idx].item())
+                                    label_text = str(lbl)
+                                except:
+                                    pass
+                            if scores is not None:
+                                try:
+                                    sc = float(scores[b_idx].item())
+                                    label_text = (label_text + f" {sc:.2f}") if label_text is not None else f"{sc:.2f}"
+                                except:
+                                    pass
+                            if label_text:
+                                draw.text((x1 + 3, y1 + 3), label_text, fill=(255,255,0))
+
+                    # convert back to CHW float32 [0,1]
+                    np_out = np.array(pil_img).astype(np.float32) / 255.0
+                    np_out = np_out.transpose(2, 0, 1)
+                    # Convert to native Python lists so the images are JSON-serializable
+                    # Using .tolist() converts numpy arrays and numpy scalars to Python types
+                    sample_images.append(np_out.tolist())
+        except Exception:
+            # Non-fatal: collecting visual samples is optional
+            pass
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -338,4 +414,5 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
         if "segm" in iou_types:
             results_json = coco_extended_metrics(coco_evaluator.coco_eval["segm"])
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
-    return stats, coco_evaluator
+    # return stats, coco_evaluator, and collected sample images (may be empty)
+    return stats, coco_evaluator, sample_images

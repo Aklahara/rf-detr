@@ -265,12 +265,37 @@ class LWDETR(nn.Module):
         """ """
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, vit_encoder_num_layers)]
         for i in range(vit_encoder_num_layers):
-            if hasattr(self.backbone[0].encoder, 'blocks'): # Not aimv2
-                if hasattr(self.backbone[0].encoder.blocks[i].drop_path, 'drop_prob'):
-                    self.backbone[0].encoder.blocks[i].drop_path.drop_prob = dp_rates[i]
-            else: # aimv2
-                if hasattr(self.backbone[0].encoder.trunk.blocks[i].drop_path, 'drop_prob'):
-                    self.backbone[0].encoder.trunk.blocks[i].drop_path.drop_prob = dp_rates[i]
+           # try different attribute paths to find the encoder blocks
+            enc_parent = getattr(self.backbone[0], 'encoder', None)
+            if enc_parent is None:
+                continue
+
+            # candidate lists of blocks in order of likelihood
+            blocks_candidate = None
+
+            # direct blocks attribute (common case)
+            if hasattr(enc_parent, 'blocks'):
+                blocks_candidate = getattr(enc_parent, 'blocks')
+            # some models expose a `trunk` containing blocks
+            elif hasattr(enc_parent, 'trunk') and hasattr(enc_parent.trunk, 'blocks'):
+                blocks_candidate = getattr(enc_parent.trunk, 'blocks')
+            # wrapper pattern: the Backbone.encoder might itself wrap a HF model in `.encoder`
+            elif hasattr(enc_parent, 'encoder'):
+                inner = getattr(enc_parent, 'encoder')
+                if hasattr(inner, 'blocks'):
+                    blocks_candidate = getattr(inner, 'blocks')
+                elif hasattr(inner, 'trunk') and hasattr(inner.trunk, 'blocks'):
+                    blocks_candidate = getattr(inner.trunk, 'blocks')
+
+            # If we found a blocks list, try to set drop_prob if attribute exists
+            if blocks_candidate is not None and i < len(blocks_candidate):
+                blk = blocks_candidate[i]
+                if hasattr(blk, 'drop_path') and hasattr(blk.drop_path, 'drop_prob'):
+                    try:
+                        blk.drop_path.drop_prob = dp_rates[i]
+                    except Exception:
+                        # ignore any unexpected issues when setting drop_prob
+                        pass
 
     def update_dropout(self, drop_rate):
         for module in self.transformer.modules():

@@ -217,10 +217,13 @@ class Model:
                     progress = float(current_step - warmup_steps_lr) / float(max(1, total_training_steps_lr - warmup_steps_lr))
                     return args.lr_min_factor + (1 - args.lr_min_factor) * 0.5 * (1 + math.cos(math.pi * progress))
                 elif args.lr_scheduler == 'step':
-                    if current_step < args.lr_drop * num_training_steps_per_epoch_lr:
-                        return 1.0
-                    else:
-                        return 0.1
+                    n = (current_step - warmup_steps_lr) // (args.lr_drop * num_training_steps_per_epoch_lr)
+                    return 1.0 * 10**(-n)
+                    # if current_step < args.lr_drop * num_training_steps_per_epoch_lr:
+                    #     return 1.0
+                    # else:
+                    #     return 0.1
+
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
         if args.distributed:
@@ -300,7 +303,7 @@ class Model:
                 args.start_epoch = checkpoint['epoch'] + 1
 
         if args.eval:
-            test_stats, coco_evaluator = evaluate(
+            test_stats, coco_evaluator, _ = evaluate(
                 model, criterion, postprocess, data_loader_val, base_ds, device, args)
             if args.output_dir:
                 if not args.segmentation_head:
@@ -369,7 +372,7 @@ class Model:
                         utils.save_on_master(weights, checkpoint_path)
 
             with torch.inference_mode():
-                test_stats, coco_evaluator = evaluate(
+                test_stats, coco_evaluator, sample_images = evaluate(
                     model, criterion, postprocess, data_loader_val, base_ds, device, args=args
                 )
             if not args.segmentation_head:
@@ -397,11 +400,15 @@ class Model:
                         **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch,
                         'n_parameters': n_parameters}
+            if 'sample_images' in locals() and sample_images:
+                log_stats['val_images'] = sample_images[:5]
             if args.use_ema:
-                ema_test_stats, _ = evaluate(
+                ema_test_stats, _, ema_sample_images = evaluate(
                     self.ema_m.module, criterion, postprocess, data_loader_val, base_ds, device, args=args
                 )
                 log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
+                if 'ema_sample_images' in locals() and ema_sample_images:
+                    log_stats['val_images'] = ema_sample_images[:5]
                 if not args.segmentation_head:
                     map_ema = ema_test_stats["coco_eval_bbox"][0]
                 else:

@@ -141,6 +141,47 @@ class MetricsTensorBoardSink:
         if 'test_loss' in values:
             self.writer.add_scalar("Loss/Test", values['test_loss'], epoch)
 
+        # Log learning rate if provided in the metrics (common keys: 'lr' or 'learning_rate')
+        lr_val = None
+        if 'lr' in values:
+            lr_val = values['lr']
+        elif 'learning_rate' in values:
+            lr_val = values['learning_rate']
+        # also accept nested train_lr or similar
+        elif 'train_lr' in values:
+            lr_val = values['train_lr']
+        if lr_val is not None:
+            try:
+                self.writer.add_scalar("Optimizer/LearningRate", float(lr_val), epoch)
+            except Exception:
+                pass
+
+        # Log validation images (a list/iterable of CHW numpy arrays or tensors) for quick visual checks
+        if 'val_images' in values and values['val_images']:
+            images = values['val_images']
+            max_images = 5
+            for i, img in enumerate(images[:max_images]):
+                try:
+                    import torch as _torch
+                    # Accept numpy arrays or tensors in CHW format
+                    if isinstance(img, _torch.Tensor):
+                        img_t = img.clone()
+                    else:
+                        img_t = _torch.from_numpy(np.array(img))
+                    # ensure float and in [0,1]
+                    img_t = img_t.float()
+                    if img_t.max() > 1.0:
+                        img_t = img_t / 255.0
+                    # add_image expects CHW
+                    if img_t.ndim == 3:
+                        self.writer.add_image(f"Validation/Image_{i}", img_t, epoch)
+                    elif img_t.ndim == 4:
+                        # batch of images
+                        self.writer.add_image(f"Validation/Image_{i}", img_t[0], epoch)
+                except Exception:
+                    # non-fatal
+                    continue
+
         if 'test_coco_eval_bbox' in values:
             coco_eval = values['test_coco_eval_bbox']
             ap50_90 = safe_index(coco_eval, 0)
